@@ -125,7 +125,7 @@ jobs:
 
           # Clean for the next build
           echo "::group::Cleaning build environment"
-          build cleanall -p ShellPkg/ShellPkg.dsc -t "$TOOLCHAIN"
+          build cleanall -p ShellPkg/ShellPkg.dsc -a X64 -b RELEASE -t "$TOOLCHAIN"
           echo "::endgroup::"
 
           # Second build: without NO_SHELL_PROFILES (Full)
