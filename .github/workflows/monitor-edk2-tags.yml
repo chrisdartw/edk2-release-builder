@@ -1,0 +1,92 @@
+name: Monitor edk2 Stable Tags
+
+on:
+  schedule:
+    # Executes at 18:00 UTC on Friday (2:00 AM UTC+8 on Saturday)
+    - cron: '0 18 * * 5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check-for-new-tag:
+    name: Check for New Stable Tag
+    runs-on: ubuntu-24.04
+    outputs:
+      proceed: ${{ steps.decision.outputs.proceed }}
+      new_tag: ${{ steps.new_tag.outputs.latest_tag }}
+    steps:
+      - name: Fetch latest stable tag from tianocore/edk2 remotely
+        id: new_tag
+        run: |
+          echo "Fetching tags from tianocore/edk2 without checkout..."
+          LATEST_STABLE_TAG=$(git ls-remote --tags --sort="v:refname" https://github.com/tianocore/edk2.git | \
+                              grep -o 'refs/tags/edk2-stable[0-9]\{6\}$' | \
+                              sed 's#refs/tags/##' | \
+                              tail -n 1)
+          
+          if [ -z "$LATEST_STABLE_TAG" ]; then
+            echo "::warning::No matching stable tag found from tianocore/edk2."
+            echo "latest_tag=''" >> $GITHUB_OUTPUT
+          else
+            echo "Latest stable tag found: $LATEST_STABLE_TAG"
+            echo "latest_tag=$LATEST_STABLE_TAG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout self repository to manage state
+        uses: actions/checkout@v5
+
+      - name: Get the last processed tag
+        id: last_tag
+        run: |
+          if [ -f "last_processed_tianocore_tag.txt" ]; then
+            echo "tag=$(cat last_processed_tianocore_tag.txt)" >> $GITHUB_OUTPUT
+          else
+            echo "tag=''" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compare tags and decide whether to proceed
+        id: decision
+        run: |
+          LAST_PROCESSED="${{ steps.last_tag.outputs.tag }}"
+          LATEST_FOUND="${{ steps.new_tag.outputs.latest_tag }}"
+          echo "Last processed tag: $LAST_PROCESSED"
+          echo "Latest tag found: $LATEST_FOUND"
+          
+          if [ -n "$LATEST_FOUND" ] && [ "$LAST_PROCESSED" != "$LATEST_FOUND" ]; then
+            echo "New tag detected! Proceeding to trigger build workflow."
+            echo "proceed=true" >> $GITHUB_OUTPUT
+          else
+            echo "No new tag. Nothing to do."
+            echo "proceed=false" >> $GITHUB_OUTPUT
+          fi
+
+  trigger-build:
+    name: Trigger Build and Release Workflow
+    if: needs.check-for-new-tag.outputs.proceed == 'true'
+    needs: check-for-new-tag
+    uses: ./.github/workflows/build-and-release.yml
+    with:
+      tags: ${{ needs.check-for-new-tag.outputs.new_tag }}
+    secrets: inherit
+
+  update-record:
+    name: Update Last Processed Tag Record
+    if: needs.trigger-build.result == 'success'
+    needs: [check-for-new-tag, trigger-build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout self repository
+        uses: actions/checkout@v5
+      
+      - name: Update record file
+        run: echo -n "${{ needs.check-for-new-tag.outputs.new_tag }}" > last_processed_tianocore_tag.txt
+      
+      - name: Commit and push updated record file
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_message: "chore: Update last processed tianocore tag to ${{ needs.check-for-new-tag.outputs.new_tag }}"
+          file_pattern: last_processed_tianocore_tag.txt
+

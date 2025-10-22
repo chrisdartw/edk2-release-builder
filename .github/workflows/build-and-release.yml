@@ -1,0 +1,197 @@
+name: Build and Release from EDK Tags
+
+on:
+  #push:
+  #  branches: [ main, master ]
+
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: 'Comma-separated EDK2 tags (e.g., edk2-stable202502,edk2-stable202505)'
+        required: true
+        default: 'edk2-stable202408,edk2-stable202508'
+
+  workflow_call:
+    inputs:
+      tags:
+        description: 'A single EDK2 tag to process'
+        required: true
+        type: string
+
+jobs:
+  # Job 1: Prepare the list of tags to process.
+  setup-tags:
+    name: 1. Prepare Tags
+    runs-on: ubuntu-24.04
+    outputs:
+      tags: ${{ steps.set-tags.outputs.tags }}
+    steps:
+      - name: Parse Tags for Matrix
+        id: set-tags
+        run: |
+          tags_input="${{ inputs.tags || 'edk2-stable202408,edk2-stable202508' }}"
+          echo "Processing tags: ${tags_input}"
+          tags_json=$(echo "${tags_input}" | jq -R -c 'split(",") | map(select(length > 0))')
+          echo "tags=${tags_json}" >> "$GITHUB_OUTPUT"
+
+  # Job 2: Build and archive artifacts for each tag.
+  archive-and-build:
+    name: 2. Build & Archive (${{ matrix.tag }})
+    needs: setup-tags
+    if: needs.setup-tags.outputs.tags != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        tag: ${{ fromJson(needs.setup-tags.outputs.tags) }}
+
+    steps:
+      - name: Checkout EDK2 Source (${{ matrix.tag }})
+        uses: actions/checkout@v5
+        with:
+          repository: tianocore/edk2
+          ref: ${{ matrix.tag }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Fix and Update Submodules
+        run: |
+          sed -i 's|github.com/Zeex/subhook.git|github.com/tianocore/edk2-subhook.git|g' .gitmodules
+          git submodule sync --recursive
+          time git submodule update --init --recursive --force
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm uuid-dev p7zip-full
+          pip3 install --upgrade pip
+          pip3 install -r pip-requirements.txt
+
+      - name: Clean and Archive Source
+        run: |
+          find . -type d -name ".git" -exec rm -rf {} +
+          find . -type f -name ".git" -exec rm -f {} +
+          find . -type l -xtype l -delete
+          mkdir -p staging
+          time 7z a -mx=9 staging/${{ matrix.tag }}.7z . -xr!staging
+
+      - name: Determine Toolchain based on tools_def.template
+        id: get_toolchain
+        run: |
+          TOOLCHAIN_TAG="GCC5"
+          if [ -f BaseTools/Conf/tools_def.template ]; then
+            echo "Found tools_def.template file"
+            if ! grep -q "!VERSION=2.00" BaseTools/Conf/tools_def.template; then
+              TOOLCHAIN_TAG="GCC"
+              echo "!VERSION=2.00 not found, using GCC toolchain"
+            else
+              echo "Found !VERSION=2.00, using default GCC5 toolchain"
+            fi
+          else
+            echo "tools_def.template file not found, using default GCC5 toolchain"
+          fi
+          echo "Selected toolchain tag: $TOOLCHAIN_TAG"
+          echo "TOOLCHAIN_TAG=${TOOLCHAIN_TAG}" >> "$GITHUB_ENV"
+
+      - name: Build ShellPkg and Prepare Artifacts
+        run: |
+          set -e
+
+          copy_and_rename() {
+            src="$1"
+            dest="$2"
+            if [[ ! -f "$src" ]]; then
+              echo "::error::Source file not found: $src"
+              exit 1
+            fi
+            echo "Copying $src to $dest"
+            cp "$src" "$dest"
+          }
+
+          # Setup build environment
+          echo "::group::Setup build environment"
+          make -C BaseTools
+          source edksetup.sh
+          echo "::endgroup::"
+          
+          TOOLCHAIN="${{ env.TOOLCHAIN_TAG }}"
+          echo "Using toolchain: $TOOLCHAIN"
+
+          # First build: with NO_SHELL_PROFILES
+          echo "::group::First Build (NO_SHELL_PROFILES)"
+          build -p ShellPkg/ShellPkg.dsc -a X64 -b RELEASE -D NO_SHELL_PROFILES -t "$TOOLCHAIN" \
+            --pcd gEfiShellPkgTokenSpaceGuid.PcdShellFileOperationSize=0x20000
+          copy_and_rename "Build/Shell/RELEASE_${TOOLCHAIN}/X64/ShellPkg/Application/Shell/Shell/OUTPUT/Shell.efi" "staging/Shell_${{ matrix.tag }}.efi"
+          echo "::endgroup::"
+
+          # Clean for the next build
+          echo "::group::Cleaning build environment"
+          build cleanall -t "$TOOLCHAIN"
+          echo "::endgroup::"
+
+          # Second build: without NO_SHELL_PROFILES (Full)
+          echo "::group::Second Build (Full)"
+          build -p ShellPkg/ShellPkg.dsc -a X64 -b RELEASE -t "$TOOLCHAIN" \
+            --pcd gEfiShellPkgTokenSpaceGuid.PcdShellFileOperationSize=0x20000
+          copy_and_rename "Build/Shell/RELEASE_${TOOLCHAIN}/X64/ShellPkg/Application/Shell/EA4BB293-2D7F-4456-A681-1F22F42CD0BC/OUTPUT/Shell.efi" "staging/Shell_2nd_${{ matrix.tag }}.efi"
+          echo "::endgroup::"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.tag }}
+          path: staging/
+
+  # Job 3: Create a GitHub Release for each tag.
+  release:
+    name: 3. Create Release (${{ matrix.tag }})
+    needs: [setup-tags, archive-and-build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        tag: ${{ fromJson(needs.setup-tags.outputs.tags) }}
+
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: artifacts-${{ matrix.tag }}
+          path: artifacts/
+
+      - name: List Downloaded Files
+        run: ls -R artifacts/
+
+      - name: Delete Existing Release and Tag (if any)
+        run: |
+          TAG="${{ matrix.tag }}"
+          echo "Checking for existing release and tag: $TAG"
+          echo "Attempting to delete release if it exists..."
+          gh release delete "$TAG" --yes --repo "$GITHUB_REPOSITORY" || echo "No existing release found or an error occurred."
+          echo "Attempting to delete tag if it exists..."
+          gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" || echo -e "\nNo existing tag found or an error occurred."
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Create GitHub Release
+        if: true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ matrix.tag }}
+          name: Release ${{ matrix.tag }}
+          body: |
+            ### EDK2 Tag: `${{ matrix.tag }}`
+
+            This release contains the complete source code (with submodules) and pre-built EFI Shell applications.
+
+            **Assets:**
+            - `${{ matrix.tag }}.7z`: Full source code archive.
+            - `Shell_2nd_${{ matrix.tag }}.efi`: EFI Shell application (Full).
+            - `Shell_${{ matrix.tag }}.efi`: EFI Shell application (Mini).
+          files: |
+            artifacts/Shell_${{ matrix.tag }}.efi
+            artifacts/Shell_2nd_${{ matrix.tag }}.efi
+            artifacts/${{ matrix.tag }}.7z
