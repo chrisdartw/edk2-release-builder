@@ -1,4 +1,7 @@
 name: Build and Release from EDK Tags
+# Force all JavaScript actions to run on Node.js 24 (temporary measure until all actions support it)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 on:
   #push:
@@ -136,7 +139,8 @@ jobs:
           echo "::endgroup::"
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+        # Updated to v5 to ensure compatibility with Node.js 24 runtime
+        uses: actions/upload-artifact@v5
         with:
           name: artifacts-${{ matrix.tag }}
           path: staging/
@@ -156,7 +160,8 @@ jobs:
 
     steps:
       - name: Download Artifacts
-        uses: actions/download-artifact@v4
+        # Updated to v5 for Node.js 24 compatibility
+        uses: actions/download-artifact@v5
         with:
           name: artifacts-${{ matrix.tag }}
           path: artifacts/
