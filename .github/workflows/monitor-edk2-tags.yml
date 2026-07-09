@@ -1,4 +1,7 @@
 name: Monitor edk2 Stable Tags
+# Force all JavaScript actions to run on Node.js 24 (temporary measure until all actions support it)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 on:
   schedule:
