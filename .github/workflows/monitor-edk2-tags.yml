@@ -10,9 +10,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  #contents: write
-  #actions: write
-  contents: read
+  contents: write
+  actions: write
 
 jobs:
   check-for-new-tag:
@@ -81,8 +80,6 @@ jobs:
     if: needs.trigger-build.result == 'success'
     needs: [check-for-new-tag, trigger-build]
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
       - name: Checkout self repository
         uses: actions/checkout@v5
