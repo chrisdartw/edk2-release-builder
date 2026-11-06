@@ -138,6 +138,18 @@ jobs:
           copy_and_rename "Build/Shell/RELEASE_${TOOLCHAIN}/X64/ShellPkg/Application/Shell/EA4BB293-2D7F-4456-A681-1F22F42CD0BC/OUTPUT/Shell.efi" "staging/Shell_2nd_${{ matrix.tag }}.efi"
           echo "::endgroup::"
 
+          # Clean for the next build
+          echo "::group::Cleaning build environment"
+          build cleanall -p ShellPkg/ShellPkg.dsc -a X64 -b RELEASE -t "$TOOLCHAIN"
+          echo "::endgroup::"
+
+          # Third build: CapsuleApp (single module from MdeModulePkg)
+          echo "::group::Build CapsuleApp"
+          build -p MdeModulePkg/MdeModulePkg.dsc -a X64 -b RELEASE -t "$TOOLCHAIN" \
+            -m MdeModulePkg/Application/CapsuleApp/CapsuleApp.inf 
+          copy_and_rename "Build/MdeModule/RELEASE_${TOOLCHAIN}/X64/MdeModulePkg/Application/CapsuleApp/CapsuleApp/OUTPUT/CapsuleApp.efi" "staging/CapsuleApp_${{ matrix.tag }}.efi"
+          echo "::endgroup::"
+
       - name: Upload Artifacts
         # Updated to v5 to ensure compatibility with Node.js 24 runtime
         uses: actions/upload-artifact@v5
@@ -196,7 +208,9 @@ jobs:
             - `${{ matrix.tag }}.7z`: Full source code archive.
             - `Shell_2nd_${{ matrix.tag }}.efi`: EFI Shell application (Full).
             - `Shell_${{ matrix.tag }}.efi`: EFI Shell application (Mini).
+            - `CapsuleApp_${{ matrix.tag }}.efi`: Capsule update test application.
           files: |
             artifacts/Shell_${{ matrix.tag }}.efi
             artifacts/Shell_2nd_${{ matrix.tag }}.efi
+            artifacts/CapsuleApp_${{ matrix.tag }}.efi
             artifacts/${{ matrix.tag }}.7z
